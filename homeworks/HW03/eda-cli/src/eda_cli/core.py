@@ -104,26 +104,24 @@ def summarize_dataset(
     return DatasetSummary(n_rows=n_rows, n_cols=n_cols, columns=columns)
 
 
-def missing_table(df: pd.DataFrame, min_share: float = 0.0) -> pd.DataFrame:
+def missing_table(df: pd.DataFrame) -> pd.DataFrame:
     """
     Таблица пропусков по колонкам: count/share.
-    Параметр min_share фильтрует колонки с долей пропусков >= min_share.
     """
     if df.empty:
         return pd.DataFrame(columns=["missing_count", "missing_share"])
 
     total = df.isna().sum()
     share = total / len(df)
-    result = pd.DataFrame(
-        {
-            "missing_count": total,
-            "missing_share": share,
-        }
-    ).sort_values("missing_share", ascending=False)
-
-    if min_share > 0:
-        result = result[result["missing_share"] >= min_share]
-
+    result = (
+        pd.DataFrame(
+            {
+                "missing_count": total,
+                "missing_share": share,
+            }
+        )
+        .sort_values("missing_share", ascending=False)
+    )
     return result
 
 
@@ -173,46 +171,117 @@ def top_categories(
 
 
 def compute_quality_flags(
-    summary: DatasetSummary, missing_df: pd.DataFrame
+    summary: DatasetSummary,
+    missing_df: pd.DataFrame,
+    df: Optional[pd.DataFrame] = None,
+    *,
+    high_cardinality_threshold: int = 50,
+    zero_share_threshold: float = 0.5,
 ) -> Dict[str, Any]:
     """
-    Простейшие эвристики «качества» данных:
-    - слишком много пропусков;
-    - подозрительно мало строк;
-    и т.п.
+    Набор эвристик «качества» данных.
+
+    Базовые эвристики (были в проекте):
+    - too_few_rows
+    - too_many_columns
+    - max_missing_share / too_many_missing
+
+    Новые эвристики (HW03):
+    - has_constant_columns: есть признаки с (почти) константными значениями
+    - has_high_cardinality_categoricals: есть категориальные признаки с высокой кардинальностью
+    - has_suspicious_id_duplicates: в идентификаторах (колонки вида *_id / id / user_id) есть дубликаты
+    - has_many_zero_values: в числовых колонках слишком большая доля нулей
     """
     flags: Dict[str, Any] = {}
+
+    # --- базовые эвристики ---
     flags["too_few_rows"] = summary.n_rows < 100
     flags["too_many_columns"] = summary.n_cols > 100
 
-    max_missing_share = (
-        float(missing_df["missing_share"].max()) if not missing_df.empty else 0.0
-    )
+    max_missing_share = float(missing_df["missing_share"].max()) if not missing_df.empty else 0.0
     flags["max_missing_share"] = max_missing_share
     flags["too_many_missing"] = max_missing_share > 0.5
 
-    # эвристика №1 - константные колонки
-    flags["has_constant_columns"] = any(col.unique <= 1 for col in summary.columns)
+    # --- эвристика 1: константные колонки ---
+    constant_cols: List[str] = []
+    for col in summary.columns:
+        # summary.unique считается по dropna=True, поэтому:
+        # - уникальных 0 -> колонка полностью пустая (считаем деградацией);
+        # - уникальных 1 -> по сути константа (даже если есть пропуски).
+        if col.unique <= 1:
+            constant_cols.append(col.name)
 
-    # эвристика №2 - high cardinality(проверка на слишком большое количество уникальных значений относительно числа строк)
-    flags["has_high_cardinality_columns"] = any(
-        (not col.is_numeric)
-        and summary.n_rows > 0
-        and (col.unique / summary.n_rows) > 0.5
-        for col in summary.columns
-    )
+    flags["has_constant_columns"] = len(constant_cols) > 0
+    flags["constant_columns"] = constant_cols
 
-    # Простейший «скор» качества
+    # --- эвристика 2: высокая кардинальность категориальных ---
+    high_cardinality: List[Dict[str, Any]] = []
+    for col in summary.columns:
+        dtype = col.dtype.lower()
+        is_cat = ("object" in dtype) or ("category" in dtype)
+        if is_cat and col.unique >= high_cardinality_threshold:
+            high_cardinality.append({"column": col.name, "unique": col.unique})
+
+    flags["has_high_cardinality_categoricals"] = len(high_cardinality) > 0
+    flags["high_cardinality_categoricals"] = high_cardinality
+    flags["high_cardinality_threshold"] = high_cardinality_threshold
+
+    # --- эвристика 3: подозрительные дубликаты в ID ---
+    suspicious_id_dups: List[Dict[str, Any]] = []
+    if df is not None and not df.empty:
+        def _is_id_column(name: str) -> bool:
+            n = name.lower()
+            return n == "id" or n == "user_id" or n.endswith("_id") or n.endswith("id")
+
+        for name in df.columns:
+            if not _is_id_column(name):
+                continue
+            s = df[name]
+            non_null = int(s.notna().sum())
+            uniq = int(s.nunique(dropna=True))
+            if non_null > 0 and uniq < non_null:
+                suspicious_id_dups.append(
+                    {"column": name, "non_null": non_null, "unique": uniq, "duplicates": non_null - uniq}
+                )
+
+    flags["has_suspicious_id_duplicates"] = len(suspicious_id_dups) > 0
+    flags["suspicious_id_duplicates"] = suspicious_id_dups
+
+    # --- эвристика 4: слишком много нулей в числовых ---
+    zero_heavy: List[Dict[str, Any]] = []
+    if df is not None and not df.empty:
+        numeric_df = df.select_dtypes(include="number")
+        for name in numeric_df.columns:
+            s = numeric_df[name]
+            denom = int(s.notna().sum())
+            if denom == 0:
+                continue
+            zero_share = float((s == 0).sum() / denom)
+            if zero_share >= zero_share_threshold:
+                zero_heavy.append({"column": name, "zero_share": zero_share})
+
+    flags["has_many_zero_values"] = len(zero_heavy) > 0
+    flags["zero_heavy_numeric"] = zero_heavy
+    flags["zero_share_threshold"] = zero_share_threshold
+
+    # --- интегральный score (0..1) ---
+    # базовая логика проекта
     score = 1.0
     score -= max_missing_share  # чем больше пропусков, тем хуже
-    if summary.n_rows < 100:
+    if flags["too_few_rows"]:
         score -= 0.2
-    if summary.n_cols > 100:
+    if flags["too_many_columns"]:
         score -= 0.1
+
+    # дополнительные штрафы за новые эвристики
     if flags["has_constant_columns"]:
-        score -= 0.1
-    if flags["has_high_cardinality_columns"]:
-        score -= 0.1
+        score -= 0.05
+    if flags["has_high_cardinality_categoricals"]:
+        score -= 0.05
+    if flags["has_suspicious_id_duplicates"]:
+        score -= 0.05
+    if flags["has_many_zero_values"]:
+        score -= 0.05
 
     score = max(0.0, min(1.0, score))
     flags["quality_score"] = score

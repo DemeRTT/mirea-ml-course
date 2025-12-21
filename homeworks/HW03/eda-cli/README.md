@@ -34,23 +34,15 @@ uv run eda-cli overview data/example.csv
 
 - `--sep` – разделитель (по умолчанию `,`);
 - `--encoding` – кодировка (по умолчанию `utf-8`).
-- `--out-dir` – каталог для отчета (по умолчанию `reports`).
-- `--max-hist-columns` - максимум числовых колонок для гистограмм. (по умолчанию `6`)
-- `--top-k-categories` - Сколько top-значений выводить для категориальных признаков. (по умолчанию `10`)
-- `--title` - заголовок отчета в Markdown. (по умолчанию `EDA-report`)
-- `--min-missing-share` - Порог доли пропусков, выше которого колонка считается проблемной. (по умолчанию: `0.2`)
-- `--help` - посмотреть все опции
-
-### Примеры использования новых опций
-
-```bash
-uv run eda-cli report data/example.csv --out-dir reports_example --title Eda --min-missing-share 0.03
-```
 
 ### Полный EDA-отчёт
 
 ```bash
-uv run eda-cli report data/example.csv --out-dir reports
+uv run eda-cli report data/example.csv --out-dir reports_example \
+  --title "Example dataset report" \
+  --max-hist-columns 8 \
+  --top-k-categories 5 \
+  --min-missing-share 0.15
 ```
 
 В результате в каталоге `reports/` появятся:
@@ -65,8 +57,6 @@ uv run eda-cli report data/example.csv --out-dir reports
 - `correlation_heatmap.png` – тепловая карта корреляций.
 
 ## Тесты
-
-Добавлены тесты для проверки новых эвристик и тест для проверки min_share в `missing_table`, чтобы убедиться, что фильтрация по доле пропусков работает корректно после изменений.
 
 ```bash
 uv run pytest -q

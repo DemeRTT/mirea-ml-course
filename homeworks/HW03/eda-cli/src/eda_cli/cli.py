@@ -66,20 +66,14 @@ def report(
     out_dir: str = typer.Option("reports", help="Каталог для отчёта."),
     sep: str = typer.Option(",", help="Разделитель в CSV."),
     encoding: str = typer.Option("utf-8", help="Кодировка файла."),
-    max_hist_columns: int = typer.Option(
-        6, help="Максимум числовых колонок для гистограмм."
-    ),
-    top_k_categories: int = typer.Option(
-        10, help="Сколько top-значений выводить для категориальных признаков."
-    ),
-    title: str = typer.Option("EDA-report", help="Заголовок отчёта в Markdown"),
-    min_missing_share: float = typer.Option(
-        0.2, help="Порог доли пропусков, выше которого колонка считается проблемной."
-    ),
+    max_hist_columns: int = typer.Option(6, help="Максимум числовых колонок для гистограмм."),
+    top_k_categories: int = typer.Option(5, help="Сколько top-значений выводить для категориальных признаков."),
+    title: str = typer.Option("EDA-отчёт", help="Заголовок отчёта (первая строка report.md)."),
+    min_missing_share: float = typer.Option(0.2, help="Порог доли пропусков для списка проблемных колонок."),
 ) -> None:
     """
     Сгенерировать полный EDA-отчёт:
-    - текстовый overview и summary по колонкам;
+    - текстовый overview и summary по колонкам (CSV/Markdown);
     - статистика пропусков;
     - корреляционная матрица;
     - top-k категорий по категориальным признакам;
@@ -93,20 +87,12 @@ def report(
     # 1. Обзор
     summary = summarize_dataset(df)
     summary_df = flatten_summary_for_print(summary)
-
-    # Передаём порог min_missing_share в missing_table
-    missing_df = missing_table(df, min_share=min_missing_share)
-
-    # Проблемные колонки (доля пропусков выше порога)
-    problem_cols = missing_df[
-        missing_df["missing_share"] > min_missing_share
-    ].index.tolist()
-
+    missing_df = missing_table(df)
     corr_df = correlation_matrix(df)
-    top_cats = top_categories(df, top_k=top_k_categories)
+    top_cats = top_categories(df, max_columns=5, top_k=top_k_categories)
 
     # 2. Качество в целом
-    quality_flags = compute_quality_flags(summary, missing_df)
+    quality_flags = compute_quality_flags(summary, missing_df, df=df)
 
     # 3. Сохраняем табличные артефакты
     summary_df.to_csv(out_root / "summary.csv", index=False)
@@ -123,18 +109,48 @@ def report(
         f.write(f"Исходный файл: `{Path(path).name}`\n\n")
         f.write(f"Строк: **{summary.n_rows}**, столбцов: **{summary.n_cols}**\n\n")
 
+        f.write("## Настройки отчёта\n\n")
+        f.write(f"- max_hist_columns: **{max_hist_columns}**\n")
+        f.write(f"- top_k_categories: **{top_k_categories}**\n")
+        f.write(f"- min_missing_share: **{min_missing_share:.0%}**\n\n")
         f.write("## Качество данных (эвристики)\n\n")
         f.write(f"- Оценка качества: **{quality_flags['quality_score']:.2f}**\n")
-        f.write(
-            f"- Макс. доля пропусков по колонке: **{quality_flags['max_missing_share']:.2%}**\n"
-        )
-        f.write(f"- Порог проблемных пропусков: **{min_missing_share:.2%}**\n")
+        f.write(f"- Макс. доля пропусков по колонке: **{quality_flags['max_missing_share']:.2%}**\n")
         f.write(f"- Слишком мало строк: **{quality_flags['too_few_rows']}**\n")
         f.write(f"- Слишком много колонок: **{quality_flags['too_many_columns']}**\n")
-        f.write(
-            f"- Слишком много пропусков: **{quality_flags['too_many_missing']}**\n\n"
-        )
+        f.write(f"- Слишком много пропусков: **{quality_flags['too_many_missing']}**\n\n")
 
+        f.write(f"- Константные колонки: **{quality_flags['has_constant_columns']}**\n")
+        if quality_flags.get("constant_columns"):
+            shown = ", ".join(quality_flags["constant_columns"][:10])
+            more = " (и ещё ...)" if len(quality_flags["constant_columns"]) > 10 else ""
+            f.write(f"  - Список: {shown}{more}\n")
+        f.write(
+            f"- Высокая кардинальность категорий (threshold={quality_flags.get('high_cardinality_threshold')}): "
+            f"**{quality_flags['has_high_cardinality_categoricals']}**\n"
+        )
+        if quality_flags.get("high_cardinality_categoricals"):
+            shown = ", ".join(
+                [f"{x['column']}({x['unique']})" for x in quality_flags["high_cardinality_categoricals"][:10]]
+            )
+            more = " (и ещё ...)" if len(quality_flags["high_cardinality_categoricals"]) > 10 else ""
+            f.write(f"  - Список: {shown}{more}\n")
+        f.write(f"- Дубликаты в ID: **{quality_flags['has_suspicious_id_duplicates']}**\n")
+        if quality_flags.get("suspicious_id_duplicates"):
+            shown = ", ".join([x["column"] for x in quality_flags["suspicious_id_duplicates"][:10]])
+            more = " (и ещё ...)" if len(quality_flags["suspicious_id_duplicates"]) > 10 else ""
+            f.write(f"  - Колонки: {shown}{more}\n")
+        f.write(
+            f"- Много нулей в числовых (threshold={quality_flags.get('zero_share_threshold')}): "
+            f"**{quality_flags['has_many_zero_values']}**\n"
+        )
+        if quality_flags.get("zero_heavy_numeric"):
+            shown = ", ".join(
+                [f"{x['column']}({x['zero_share']:.0%})" for x in quality_flags["zero_heavy_numeric"][:10]]
+            )
+            more = " (и ещё ...)" if len(quality_flags["zero_heavy_numeric"]) > 10 else ""
+            f.write(f"  - Список: {shown}{more}\n")
+        f.write("\n")
         f.write("## Колонки\n\n")
         f.write("См. файл `summary.csv`.\n\n")
 
@@ -143,13 +159,15 @@ def report(
             f.write("Пропусков нет или датасет пуст.\n\n")
         else:
             f.write("См. файлы `missing.csv` и `missing_matrix.png`.\n\n")
-
-        f.write("## Проблемные колонки по доле пропусков\n\n")
-        if problem_cols:
-            for col in problem_cols:
-                f.write(f"- {col} ({missing_df.loc[col, 'missing_share']:.2%})\n\n")
-        else:
-            f.write("Нет колонок с пропусками выше порога.\n\n")
+            problem = missing_df[missing_df["missing_share"] >= min_missing_share]
+            f.write(f"Порог проблемных пропусков: **{min_missing_share:.0%}**\n\n")
+            if problem.empty:
+                f.write("Колонок с долей пропусков выше порога нет.\n\n")
+            else:
+                f.write("Колонки с проблемными пропусками:\n\n")
+                for col_name, row in problem.head(50).iterrows():
+                    f.write(f"- `{col_name}`: **{row['missing_share']:.1%}** (count={int(row['missing_count'])})\n")
+                f.write("\n")
 
         f.write("## Корреляция числовых признаков\n\n")
         if corr_df.empty:
@@ -161,11 +179,10 @@ def report(
         if not top_cats:
             f.write("Категориальные/строковые признаки не найдены.\n\n")
         else:
-            f.write(f"Топ-{top_k_categories} значений по категориальным признакам.\n")
-            f.write("См. файлы в папке `top_categories/`.\n\n")
+            f.write(f"См. файлы в папке `top_categories/` (top-k = {top_k_categories}).\n\n")
 
         f.write("## Гистограммы числовых колонок\n\n")
-        f.write(f"См. максимум {max_hist_columns} гистограмм: `hist_*.png`.\n")
+        f.write("См. файлы `hist_*.png`.\n")
 
     # 5. Картинки
     plot_histograms_per_column(df, out_root, max_columns=max_hist_columns)
@@ -174,9 +191,7 @@ def report(
 
     typer.echo(f"Отчёт сгенерирован в каталоге: {out_root}")
     typer.echo(f"- Основной markdown: {md_path}")
-    typer.echo(
-        "- Табличные файлы: summary.csv, missing.csv, correlation.csv, top_categories/*.csv"
-    )
+    typer.echo("- Табличные файлы: summary.csv, missing.csv, correlation.csv, top_categories/*.csv")
     typer.echo("- Графики: hist_*.png, missing_matrix.png, correlation_heatmap.png")
 
 

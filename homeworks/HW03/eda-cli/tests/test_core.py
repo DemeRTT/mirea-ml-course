@@ -60,54 +60,15 @@ def test_correlation_and_top_categories():
     assert "value" in city_table.columns
     assert len(city_table) <= 2
 
-
-def test_has_constant_columns_flag():
+def test_quality_flags_has_constant_columns():
     df = pd.DataFrame(
         {
-            "age": [10, 20, 30, 40],
-            "gender": ["M", "M", "M", "M"],  # константная колонка
+            "const": [1, 1, 1, 1],
+            "var": [1, 2, 3, 4],
         }
     )
-
     summary = summarize_dataset(df)
     missing_df = missing_table(df)
-    flags = compute_quality_flags(summary, missing_df)
-
+    flags = compute_quality_flags(summary, missing_df, df=df)
     assert flags["has_constant_columns"] is True
-
-
-def test_has_high_cardinality_columns_flag():
-    df = pd.DataFrame(
-        {
-            "user_id": ["u1", "u2", "u3", "u4", "u5"],
-            "age": [10, 20, 30, 40, 50],
-        }
-    )
-
-    summary = summarize_dataset(df)
-    missing_df = missing_table(df)
-    flags = compute_quality_flags(summary, missing_df)
-
-    assert flags["has_high_cardinality_columns"] is True
-
-
-def test_missing_table_min_share():
-    df = pd.DataFrame(
-        {
-            "a": [1, 2, None, 4],
-            "b": [None, None, 3, 4],
-            "c": [1, 2, 3, 4],
-        }
-    )
-
-    # Проверяем без фильтрации
-    result_all = missing_table(df)
-    assert "a" in result_all.index
-    assert "b" in result_all.index
-    assert "c" in result_all.index
-
-    # Фильтруем по min_share=0.5
-    result_filtered = missing_table(df, min_share=0.5)
-    # Только колонка 'b' должна остаться (2 пропуска из 4 = 0.5)
-    assert list(result_filtered.index) == ["b"]
-    assert result_filtered.loc["b", "missing_share"] == 0.5
+    assert "const" in flags.get("constant_columns", [])
